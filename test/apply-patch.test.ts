@@ -170,4 +170,43 @@ describe("applyPatch", () => {
       ),
     ).rejects.toThrow("already exists");
   });
+
+  test("rejects writes through a symlinked parent outside the root", async () => {
+    const root = await makeRoot();
+    const outside = await makeRoot();
+    await fs.symlink(outside, path.join(root, "linked"));
+
+    await expect(
+      applyPatch(
+        root,
+        `*** Begin Patch
+*** Add File: linked/escaped.txt
++nope
+*** End Patch`,
+      ),
+    ).rejects.toThrow("escapes the working directory through a symlink");
+    expect(
+      await fs.stat(path.join(outside, "escaped.txt")).catch(() => undefined),
+    ).toBe(undefined);
+  });
+
+  test("accepts a checked canonical target when the root is a symlink", async () => {
+    const root = await makeRoot();
+    const aliasParent = await makeRoot();
+    const alias = path.join(aliasParent, "root-alias");
+    await fs.symlink(root, alias);
+    const target = path.join(await fs.realpath(root), "canonical.txt");
+
+    await applyPatch(
+      alias,
+      `*** Begin Patch
+*** Add File: ${target}
++safe
+*** End Patch`,
+    );
+
+    expect(await fs.readFile(path.join(root, "canonical.txt"), "utf8")).toBe(
+      "safe\n",
+    );
+  });
 });

@@ -13,6 +13,7 @@ import { createInlineHighlightMap } from "./highlight.ts";
 import { getUnifiedLayout } from "./layout.ts";
 import {
   getChangeLabel,
+  getChangePath,
   getDiffLineCount,
   type DiffModel,
 } from "./model.ts";
@@ -192,13 +193,30 @@ function renderHeader(
   width: number,
   theme: Theme,
 ): string {
-  const fileText =
-    details.stats.files > 1 ? ` ${details.stats.files} files` : "";
+  const change = details.changes.length === 1 ? details.changes[0] : undefined;
+  let title: string;
+  if (change) {
+    const verb = change.type === "add"
+      ? "Added"
+      : change.type === "delete"
+        ? "Deleted"
+        : "Edited";
+    title = `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg(
+      "accent",
+      getChangePath(change),
+    )}`;
+  } else if (details.stats.files > 1) {
+    title = `${theme.fg("toolTitle", theme.bold("Edited"))} ${theme.fg(
+      "toolOutput",
+      `${details.stats.files} files`,
+    )}`;
+  } else {
+    title = theme.fg("toolTitle", theme.bold("Applied patch"));
+  }
   const text = [
-    theme.fg("success", "✓"),
+    theme.fg("success", "•"),
     " ",
-    theme.fg("toolTitle", theme.bold("Apply Patch")),
-    fileText,
+    title,
     " ",
     formatStats(details.stats.added, details.stats.removed, theme),
   ].join("");
@@ -223,14 +241,16 @@ export function renderUnifiedDiff(
   const budgets = distributeLineBudget(totalBudget, details.changes.length);
 
   details.changes.forEach((change, index) => {
-    lines.push("");
-    const label = `${getChangeLabel(change)} `;
-    const heading = `${layout.indent}${theme.bold(label)}${formatStats(
-      change.added,
-      change.removed,
-      theme,
-    )}`;
-    lines.push(truncateLine(heading, layout.width));
+    if (details.changes.length > 1) {
+      lines.push("");
+      const label = `${getChangeLabel(change)} `;
+      const heading = `${layout.indent}${theme.bold(label)}${formatStats(
+        change.added,
+        change.removed,
+        theme,
+      )}`;
+      lines.push(truncateLine(heading, layout.width));
+    }
 
     const contentWidth = Math.max(1, layout.width - visibleWidth(layout.indent));
     const rendered = renderFileDiff(

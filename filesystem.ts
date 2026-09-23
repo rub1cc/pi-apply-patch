@@ -1,28 +1,82 @@
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Snapshot, VirtualFile } from "./types.ts";
+
+function isWithin(candidate: string, root: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
+function canonicalizePathSync(
+  value: string,
+  visited = new Set<string>(),
+): string {
+  const normalized = path.resolve(value);
+  if (visited.has(normalized)) {
+    throw new Error(`Symlink cycle while resolving patch path: ${normalized}`);
+  }
+  visited.add(normalized);
+
+  const root = path.parse(normalized).root;
+  const components = path.relative(root, normalized).split(path.sep).filter(Boolean);
+  let current = root;
+
+  for (let index = 0; index < components.length; index += 1) {
+    const component = components[index]!;
+    const candidate = path.resolve(current, component);
+    try {
+      const stats = lstatSync(candidate);
+      if (stats.isSymbolicLink()) {
+        const link = readlinkSync(candidate);
+        const target = path.isAbsolute(link)
+          ? path.resolve(link)
+          : path.resolve(path.dirname(candidate), link);
+        return canonicalizePathSync(
+          path.resolve(target, ...components.slice(index + 1)),
+          visited,
+        );
+      }
+      current = realpathSync(candidate);
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+      return path.resolve(current, ...components.slice(index));
+    }
+  }
+
+  return current;
+}
 
 export function resolvePatchPath(root: string, filePath: string): string {
   if (filePath.includes("\0")) {
     throw new Error("File path contains a null byte");
   }
 
-  const resolved = path.isAbsolute(filePath)
+  const resolvedRoot = path.resolve(root);
+  const inputIsAbsolute = path.isAbsolute(filePath);
+  const resolved = inputIsAbsolute
     ? path.normalize(filePath)
-    : path.resolve(root, filePath);
-  const relative = path.relative(root, resolved);
+    : path.resolve(resolvedRoot, filePath);
 
   if (
-    relative === "" ||
-    relative === "." ||
-    relative.startsWith(`..${path.sep}`) ||
-    relative === ".." ||
-    path.isAbsolute(relative)
+    !inputIsAbsolute &&
+    (!isWithin(resolved, resolvedRoot) || resolved === resolvedRoot)
   ) {
     throw new Error(`Path escapes the working directory: ${filePath}`);
   }
 
-  return resolved;
+  const canonicalRoot = canonicalizePathSync(resolvedRoot);
+  const canonicalResolved = canonicalizePathSync(resolved);
+  if (!isWithin(canonicalResolved, canonicalRoot) || canonicalResolved === canonicalRoot) {
+    throw new Error(`Path escapes the working directory through a symlink: ${filePath}`);
+  }
+
+  return canonicalResolved;
 }
 
 export async function readSnapshot(filePath: string): Promise<Snapshot> {

@@ -31,28 +31,48 @@ function getCallComponent(
   }
   if (state.callComponent) return state.callComponent;
 
-  const component = new Box(1, 1, (text: string) => text);
+  const component = new Box(0, 0, (text: string) => text);
   state.callComponent = component;
   return component;
 }
 
 function renderPendingCall(component: Box, theme: Theme): Box {
-  component.setBgFn((text: string) => theme.bg("toolPendingBg", text));
+  component.setBgFn((text: string) => text);
   component.clear();
   component.addChild(
-    new Text(theme.fg("toolTitle", theme.bold("apply_patch")), 0, 0),
+    new Text(
+      `${theme.fg("accent", "•")} ${theme.fg(
+        "toolTitle",
+        theme.bold("Applying patch"),
+      )}`,
+      0,
+      0,
+    ),
   );
   return component;
 }
 
 function renderError(component: Box, errorText: string, theme: Theme): Box {
-  component.setBgFn((text: string) => theme.bg("toolErrorBg", text));
+  component.setBgFn((text: string) => text);
   component.clear();
+  const details = errorText
+    ? `\n${errorText
+        .split("\n")
+        .map(
+          (line, index) =>
+            `${theme.fg("muted", index === 0 ? "  └ " : "    ")}${theme.fg(
+              "error",
+              line,
+            )}`,
+        )
+        .join("\n")}`
+    : "";
   component.addChild(
     new Text(
-      `${theme.fg("error", "✘ Failed to apply patch")}${
-        errorText ? `\n${theme.fg("muted", errorText)}` : ""
-      }`,
+      `${theme.fg("error", "•")} ${theme.fg(
+        "error",
+        theme.bold("Failed to apply patch"),
+      )}${details}`,
       0,
       0,
     ),
@@ -73,7 +93,16 @@ function renderSuccess(
   component.clear();
 
   if (!details) {
-    component.addChild(new Text(theme.fg("success", "✓ Patch applied"), 0, 0));
+    component.addChild(
+      new Text(
+        `${theme.fg("success", "•")} ${theme.fg(
+          "toolTitle",
+          theme.bold("Applied patch"),
+        )}`,
+        0,
+        0,
+      ),
+    );
     return component;
   }
 
@@ -109,6 +138,7 @@ export function registerApplyPatch(
     name: "apply_patch",
     label: "Apply Patch",
     renderShell: "self",
+    executionMode: "sequential",
 
     description:
       "Apply a Codex-style patch to files in the current working directory. " +
@@ -208,7 +238,14 @@ export function registerApplyPatch(
             config: rendererConfig,
             theme,
           })
-        : new Text(theme.fg("success", "✓ Patch applied"), 0, 0);
+        : new Text(
+            `${theme.fg("success", "•")} ${theme.fg(
+              "toolTitle",
+              theme.bold("Applied patch"),
+            )}`,
+            0,
+            0,
+          );
     },
   });
 }

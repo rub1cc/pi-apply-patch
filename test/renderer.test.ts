@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import registerApplyPatch from "../index.ts";
 import { createDiff } from "../renderer/diff.ts";
 import { createInlineDiff } from "../renderer/inline-diff.ts";
 import { normalizeApplyPatchDetails } from "../renderer/normalize.ts";
@@ -106,8 +107,8 @@ describe("unified renderer", () => {
       .map(stripTerminalSequences)
       .join("\n");
 
-    expect(output).toContain("✓ Apply Patch (+2 -1)");
-    expect(output).toContain("src/example.ts (+2 -1)");
+    expect(output).toContain("• Edited src/example.ts (+2 -1)");
+    expect(output.match(/src\/example\.ts/g)).toHaveLength(1);
     expect(output).toContain("2 │-   return oldCall();");
     expect(output).toContain("2 │+   const value = newCall();");
   });
@@ -155,6 +156,75 @@ describe("unified renderer", () => {
     );
     expect(lines).toHaveLength(1);
     expect(visibleWidth(lines[0])).toBeLessThanOrEqual(20);
+  });
+
+  test("renders multi-file patch and per-file summaries", () => {
+    const first = detailsFor("old\n", "new\n", "src/one.ts").changes[0];
+    const second = detailsFor("", "added\n", "src/two.ts").changes[0];
+    const multi: ApplyPatchDetails = {
+      changes: [first, { ...second, type: "add" }],
+      stats: {
+        files: 2,
+        added: first.added + second.added,
+        removed: first.removed + second.removed,
+      },
+    };
+    const output = renderUnifiedDiff(
+      multi,
+      100,
+      false,
+      { ...DEFAULT_DIFF_RENDERER_CONFIG },
+      theme,
+    )
+      .map(stripTerminalSequences)
+      .join("\n");
+
+    expect(output).toContain("• Edited 2 files");
+    expect(output).toContain("src/one.ts");
+    expect(output).toContain("Added src/two.ts");
+  });
+});
+
+describe("apply_patch activity states", () => {
+  test("uses bullet-based pending and failure states", () => {
+    const tools: any[] = [];
+    registerApplyPatch({
+      registerTool(tool: unknown) {
+        tools.push(tool);
+      },
+    } as any);
+    const tool = tools[0];
+    const state: Record<string, unknown> = {};
+    const baseContext = {
+      args: { patch: "*** Begin Patch\n*** End Patch" },
+      toolCallId: "patch-1",
+      invalidate() {},
+      lastComponent: undefined,
+      state,
+      cwd: "/repo",
+      executionStarted: true,
+      argsComplete: true,
+      isPartial: true,
+      expanded: false,
+      showImages: false,
+      isError: false,
+    };
+
+    const call = tool.renderCall(baseContext.args, theme, baseContext);
+    expect(call.render(80).map(stripTerminalSequences).join("\n")).toContain(
+      "• Applying patch",
+    );
+
+    tool.renderResult(
+      { content: [{ type: "text", text: "Patch context was not found" }] },
+      { expanded: false, isPartial: false },
+      theme,
+      { ...baseContext, isPartial: false, isError: true },
+    );
+    const failed = call.render(80).map(stripTerminalSequences).join("\n");
+    expect(failed).toContain("• Failed to apply patch");
+    expect(failed).toContain("└ Patch context was not found");
+    expect(failed).not.toContain("✓");
   });
 });
 
