@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { getKeybindings, KeybindingsManager, setKeybindings, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
+import { createDiffComponent } from "../renderer/component.ts";
 import registerApplyPatch from "../index.ts";
 import { createDiff } from "../renderer/diff.ts";
 import { createInlineDiff } from "../renderer/inline-diff.ts";
@@ -141,7 +142,7 @@ describe("unified renderer", () => {
       theme,
     );
     expect(lines.map(stripTerminalSequences).join("\n")).toContain(
-      "more diff lines",
+      "more diff rows",
     );
     expect(lines.every((line) => visibleWidth(line) <= 60)).toBe(true);
   });
@@ -182,6 +183,121 @@ describe("unified renderer", () => {
     expect(output).toContain("• Edited 2 files");
     expect(output).toContain("src/one.ts");
     expect(output).toContain("Added src/two.ts");
+  });
+});
+
+describe("complete diff presentation", () => {
+  const config = { ...DEFAULT_DIFF_RENDERER_CONFIG };
+  const plain = (lines: string[]) => lines.map(stripTerminalSequences).join("\n");
+  const additions = (count: number, path = "large.ts") => detailsFor(
+    "", Array.from({ length: count }, (_, i) => `row-${i}`).join("\n") + "\n", path,
+  );
+
+  for (const count of [150, 650]) {
+    test(`expansion renders all ${count} lines despite legacy limits`, () => {
+      const details = additions(count);
+      const component = createDiffComponent({ details, expanded: true,
+        config: { expandedLines: 2, hardLineLimit: 3 }, theme });
+      const lines = component.render(80);
+      expect(lines).toHaveLength(count + 1); // no configured shortcut in standalone tests
+      for (let i = 0; i < count; i++) expect(plain(lines)).toContain(`row-${i}`);
+      expect(plain(lines)).not.toContain("more diff rows");
+      expect(lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+    });
+  }
+
+  test("expansion wraps the entire long tail even with truncate configured", () => {
+    const details = detailsFor("", "x".repeat(20000) + "TAIL_END\n");
+    const component = createDiffComponent({ details, expanded: true,
+      config: { longLines: "truncate" }, theme });
+    const lines = component.render(40);
+    expect(lines.length).toBeGreaterThan(500);
+    const contents = lines.slice(1).map((line) => stripTerminalSequences(line).slice(5).trimEnd()).join("");
+    expect(contents).toBe("x".repeat(20000) + "TAIL_END");
+    expect(lines.every((line) => visibleWidth(line) <= 40)).toBe(true);
+    expect(component.render(40)).toBe(lines);
+    component.invalidate();
+    expect(component.render(40)).toEqual(lines);
+    expect(component.render(60).length).toBeLessThan(lines.length);
+  });
+
+  test("small uneven multi-file diffs use the full shared preview budget", () => {
+    for (const counts of [[1, 23], [23, 1], [1, 1, 22]]) {
+      const changes = counts.map((count, i) => additions(count, `file-${i}.ts`).changes[0]);
+      const details = { changes, stats: { files: counts.length, added: 24, removed: 0 } };
+      const lines = renderUnifiedDiff(details, 80, false, config, theme);
+      expect(plain(lines)).not.toContain("more diff rows");
+      expect(lines.filter((line) => line.includes("│+"))).toHaveLength(24);
+    }
+  });
+
+  test("small wrapped multi-file diffs remain complete even with truncate configured", () => {
+    const changes = [
+      detailsFor("", "short\n", "short.ts").changes[0],
+      detailsFor("", "x".repeat(300) + "TAIL\n", "wrapped.ts").changes[0],
+    ];
+    const details = { changes, stats: { files: 2, added: 2, removed: 0 } };
+    const lines = renderUnifiedDiff(details, 40, false, { ...config, longLines: "truncate" }, theme);
+    expect(plain(lines)).toContain("TAIL");
+    expect(plain(lines)).not.toContain("more diff rows");
+    expect(lines.every((line) => visibleWidth(line) <= 40)).toBe(true);
+  });
+
+  test("expanded multi-hunk diffs preserve final additions and deletions", () => {
+    const oldContent = Array.from({ length: 700 }, (_, i) => `before-${i}`).join("\n") + "\n";
+    const newContent = oldContent.replace("before-0\n", "after-0\n").replace("before-699\n", "after-699\n");
+    const details = detailsFor(oldContent, newContent);
+    expect(details.changes[0].diff.hunks.length).toBeGreaterThan(1);
+    const output = plain(renderUnifiedDiff(details, 80, true, { ...config, expandedLines: 1, hardLineLimit: 1 }, theme));
+    expect(output).toContain("before-699");
+    expect(output).toContain("after-699");
+    expect(output).not.toContain("more diff rows");
+  });
+
+  test("narrow expansion shows content and missing-newline notes within width", () => {
+    for (const width of [1, 2, 3, 4, 10, 20, 23]) {
+      const lines = renderUnifiedDiff(detailsFor("", "abcdefghij"), width, true, config, theme);
+      expect(lines.length).toBeGreaterThan(1);
+      expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+      expect(plain(lines)).toContain("a");
+      expect(plain(lines)).toContain("j");
+      const wide = renderUnifiedDiff(detailsFor("", "界界\n"), width, true, config, theme);
+      expect(wide.every((line) => visibleWidth(line) <= width)).toBe(true);
+    }
+  });
+
+  test("configured hints track collapsed/expanded/collapsed tool states", () => {
+    const previous = getKeybindings();
+    setKeybindings(new KeybindingsManager({
+      "app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tools" },
+    }, { "app.tools.expand": "ctrl+y" }));
+    try {
+      const tools: any[] = [];
+      registerApplyPatch({ registerTool: (tool: unknown) => tools.push(tool) } as any);
+      const tool = tools[0];
+      const context = { state: {}, lastComponent: undefined, isError: false };
+      const call = tool.renderCall({}, theme, context);
+      const result = { content: [], details: additions(650) };
+      for (const expanded of [false, true, false]) {
+        tool.renderResult(result, { expanded, isPartial: false }, theme, context);
+        const output = plain(call.render(80));
+        expect(output).toContain(`ctrl+y to ${expanded ? "collapse" : "expand"}`);
+        expect(output).not.toContain("ctrl+o");
+        expect(output.includes("row-649")).toBe(expanded);
+        expect(output.includes("more diff rows")).toBe(!expanded);
+      }
+      const small = plain(renderUnifiedDiff(additions(2), 80, false, config, theme));
+      expect(small).not.toContain("to expand");
+      const narrow = renderUnifiedDiff(additions(50), 20, false, config, theme);
+      expect(plain(narrow)).toContain("ctrl+y to expand");
+      expect(narrow.every((line) => visibleWidth(line) <= 20)).toBe(true);
+      setKeybindings(new KeybindingsManager({
+        "app.tools.expand": { defaultKeys: [], description: "Toggle tools" },
+      }));
+      expect(plain(renderUnifiedDiff(additions(50), 80, false, config, theme))).not.toContain("to expand");
+    } finally {
+      setKeybindings(previous);
+    }
   });
 });
 

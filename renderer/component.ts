@@ -10,6 +10,8 @@ import { renderUnifiedDiff } from "./unified.ts";
 export interface CreateDiffComponentOptions {
   details: ApplyPatchDetails;
   expanded: boolean;
+  /** Hide the summary when the caller already renders its own activity header. */
+  showHeader?: boolean;
   config?: Partial<DiffRendererConfig>;
   theme: Theme;
 }
@@ -19,10 +21,7 @@ function resolveConfig(
 ): DiffRendererConfig {
   const resolved = { ...DEFAULT_DIFF_RENDERER_CONFIG, ...config };
   resolved.collapsedLines = Math.max(1, resolved.collapsedLines);
-  resolved.expandedLines = Math.max(
-    resolved.collapsedLines,
-    resolved.expandedLines,
-  );
+  // expandedLines is retained only for API compatibility; expansion is uncapped.
   resolved.hardLineLimit = Math.max(1, resolved.hardLineLimit);
   return resolved;
 }
@@ -30,10 +29,17 @@ function resolveConfig(
 class RichDiffComponent implements Component {
   private cachedWidth?: number;
   private cachedLines?: string[];
-  private readonly config: DiffRendererConfig;
+  private config: DiffRendererConfig;
 
-  constructor(private readonly options: CreateDiffComponentOptions) {
+  constructor(private options: CreateDiffComponentOptions) {
     this.config = resolveConfig(options.config);
+  }
+
+  setOptions(options: CreateDiffComponentOptions): this {
+    this.options = options;
+    this.config = resolveConfig(options.config);
+    this.invalidate();
+    return this;
   }
 
   render(width: number): string[] {
@@ -47,6 +53,7 @@ class RichDiffComponent implements Component {
       this.options.expanded,
       this.config,
       this.options.theme,
+      this.options.showHeader,
     );
     this.cachedWidth = width;
     return this.cachedLines;
@@ -60,6 +67,9 @@ class RichDiffComponent implements Component {
 
 export function createDiffComponent(
   options: CreateDiffComponentOptions,
+  lastComponent?: Component,
 ): Component {
-  return new RichDiffComponent(options);
+  return lastComponent instanceof RichDiffComponent
+    ? lastComponent.setOptions(options)
+    : new RichDiffComponent(options);
 }

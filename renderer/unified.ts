@@ -1,4 +1,4 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { keyText, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   truncateToWidth,
   visibleWidth,
@@ -14,36 +14,28 @@ import { getUnifiedLayout } from "./layout.ts";
 import {
   getChangeLabel,
   getChangePath,
-  getDiffLineCount,
   type DiffModel,
 } from "./model.ts";
 import { colorForLine, formatStats, renderInlineSpans } from "./theme.ts";
-import { distributeLineBudget, truncateLine } from "./truncate.ts";
+import { truncateLine } from "./truncate.ts";
 
-interface SelectedDiff {
-  hunks: DiffLine[][];
-  selectedLines: number;
-  totalLines: number;
-}
-
-function selectDiffLines(change: DiffModel, limit: number): SelectedDiff {
-  const hunks: DiffLine[][] = [];
-  let remaining = Math.max(0, limit);
-  let selectedLines = 0;
-
-  for (const hunk of change.diff.hunks) {
-    if (remaining <= 0) break;
-    const lines = hunk.lines.slice(0, remaining);
-    if (lines.length > 0) hunks.push(lines);
-    selectedLines += lines.length;
-    remaining -= lines.length;
+// Allocate visual rows fairly, returning unused shares from short files.
+function allocateRows(sizes: number[], total: number): number[] {
+  const budgets = sizes.map(() => 0);
+  let remaining = Math.max(0, Math.floor(total));
+  while (remaining > 0) {
+    const active = sizes.flatMap((size, index) =>
+      budgets[index] < size ? [index] : [],
+    );
+    if (active.length === 0) break;
+    const share = Math.max(1, Math.floor(remaining / active.length));
+    for (const index of active) {
+      const count = Math.min(share, sizes[index] - budgets[index], remaining);
+      budgets[index] += count;
+      remaining -= count;
+    }
   }
-
-  return {
-    hunks,
-    selectedLines,
-    totalLines: getDiffLineCount(change.diff),
-  };
+  return budgets;
 }
 
 function maxLineNumber(change: DiffModel): number {
@@ -85,12 +77,12 @@ function renderDiffLine(
     ? String(number ?? "").padStart(numberWidth, " ")
     : "";
   const bar = config.indicator === "bar" ? "│" : "";
-  const gutterText = showLineNumbers
-    ? `${numberText} ${bar}${sign} `
-    : `${bar}${sign} `;
-  const continuationText = showLineNumbers
-    ? `${"".padStart(numberWidth, " ")} ${bar}  `
-    : `${bar}  `;
+  const gutterText = width < 4
+    ? (width > 1 ? sign : "")
+    : showLineNumbers ? `${numberText} ${bar}${sign} ` : `${bar}${sign} `;
+  const continuationText = width < 4
+    ? " ".repeat(gutterText.length)
+    : showLineNumbers ? `${"".padStart(numberWidth, " ")} ${bar}  ` : `${bar}  `;
   const gutter = theme.fg("muted", gutterText);
   const continuation = theme.fg("muted", continuationText);
   const contentWidth = Math.max(1, width - visibleWidth(gutterText));
@@ -122,43 +114,37 @@ function renderDiffLine(
   );
 
   if (line.noNewlineAtEnd) {
-    rendered.push(
-      highlightRow(
-        `${continuation}${theme.fg("muted", "\\ No newline at end of file")}`,
-      ),
-    );
+    for (const note of wrapTextWithAnsi(
+      theme.fg("muted", "\\ No newline at end of file"), contentWidth,
+    )) {
+      rendered.push(highlightRow(`${continuation}${note}`));
+    }
   }
   return rendered;
 }
 
 function renderFileDiff(
   change: DiffModel,
-  lineBudget: number,
   width: number,
   showLineNumbers: boolean,
   config: DiffRendererConfig,
   theme: Theme,
 ): string[] {
   if (change.diff.hunks.length === 0) {
-    return [theme.fg("muted", "  (renamed without content changes)")];
+    return wrapTextWithAnsi(theme.fg("muted", "(renamed without content changes)"), width);
   }
 
-  const selection = selectDiffLines(change, lineBudget);
-  const selectedFlat = selection.hunks.flat();
+  const flatLines = change.diff.hunks.flatMap((hunk) => hunk.lines);
   const highlights = config.wordHighlighting
-    ? createInlineHighlightMap(selectedFlat)
+    ? createInlineHighlightMap(flatLines)
     : new Map<DiffLine, import("./inline-diff.ts").InlineSpan[]>();
   const numberWidth = String(maxLineNumber(change)).length;
   const lines: string[] = [];
-  let completedLogicalLines = 0;
 
-  outer: for (let hunkIndex = 0; hunkIndex < selection.hunks.length; hunkIndex++) {
-    if (hunkIndex > 0) {
-      if (lines.length >= lineBudget) break;
-      lines.push(theme.fg("muted", "···"));
-    }
+  for (let hunkIndex = 0; hunkIndex < change.diff.hunks.length; hunkIndex++) {
+    if (hunkIndex > 0) lines.push(theme.fg("muted", "·".repeat(Math.min(3, width))));
 
-    for (const line of selection.hunks[hunkIndex]) {
+    for (const line of change.diff.hunks[hunkIndex].lines) {
       const rendered = renderDiffLine(
         line,
         numberWidth,
@@ -168,22 +154,8 @@ function renderFileDiff(
         highlights,
         theme,
       );
-      const available = lineBudget - lines.length;
-      if (available <= 0) break outer;
-      lines.push(...rendered.slice(0, available));
-      if (rendered.length <= available) completedLogicalLines++;
-      else break outer;
+      for (const row of rendered) lines.push(row);
     }
-  }
-
-  const hidden = selection.totalLines - completedLogicalLines;
-  if (hidden > 0) {
-    lines.push(
-      theme.fg(
-        "muted",
-        `… ${hidden} more diff line${hidden === 1 ? "" : "s"}`,
-      ),
-    );
   }
   return lines;
 }
@@ -229,16 +201,36 @@ export function renderUnifiedDiff(
   expanded: boolean,
   config: DiffRendererConfig,
   theme: Theme,
+  showHeader = true,
 ): string[] {
   const layout = getUnifiedLayout(width, config);
-  const lines = [renderHeader(details, layout.width, theme)];
-  if (layout.summaryOnly || details.changes.length === 0) return lines;
+  const lines = showHeader ? [renderHeader(details, layout.width, theme)] : [];
+  if (details.changes.length === 0) return lines;
 
-  const configuredBudget = expanded
-    ? config.expandedLines
-    : config.collapsedLines;
-  const totalBudget = Math.min(configuredBudget, config.hardLineLimit);
-  const budgets = distributeLineBudget(totalBudget, details.changes.length);
+  const shortcut = keyText("app.tools.expand");
+  const hint = shortcut ? `${shortcut} to ${expanded ? "collapse" : "expand"}` : "";
+  if (layout.summaryOnly && !expanded) {
+    if (hint) lines.push(...wrapTextWithAnsi(theme.fg("muted", hint), layout.width));
+    return lines;
+  }
+
+  const contentWidth = Math.max(1, layout.width - visibleWidth(layout.indent));
+  // Expansion is a complete view, never a second, larger preview. Measure the
+  // fully wrapped rows so small uneven multi-file diffs also fit in full.
+  const fullConfig = { ...config, longLines: "wrap" as const };
+  const fullFiles = details.changes.map((change) => renderFileDiff(
+    change, contentWidth, layout.showLineNumbers, fullConfig, theme,
+  ));
+  const totalBudget = Math.max(1, Math.floor(Math.min(config.collapsedLines, config.hardLineLimit)));
+  const sizes = fullFiles.map((rows) => rows.length);
+  const large = sizes.reduce((sum, size) => sum + size, 0) > totalBudget;
+  // The optional truncate preference applies only to large collapsed previews.
+  const files = !expanded && large && config.longLines === "truncate"
+    ? details.changes.map((change) => renderFileDiff(
+        change, contentWidth, layout.showLineNumbers, config, theme,
+      ))
+    : fullFiles;
+  const budgets = allocateRows(files.map((rows) => rows.length), totalBudget);
 
   details.changes.forEach((change, index) => {
     if (details.changes.length > 1) {
@@ -252,19 +244,23 @@ export function renderUnifiedDiff(
       lines.push(truncateLine(heading, layout.width));
     }
 
-    const contentWidth = Math.max(1, layout.width - visibleWidth(layout.indent));
-    const rendered = renderFileDiff(
-      change,
-      budgets[index],
-      contentWidth,
-      layout.showLineNumbers,
-      config,
-      theme,
-    );
-    for (const line of rendered) {
-      lines.push(`${layout.indent}${truncateLine(line, contentWidth)}`);
+    const rendered = files[index];
+    const shown = expanded ? rendered : rendered.slice(0, budgets[index]);
+    for (const line of shown) {
+      // A two-column glyph cannot fit a one-column terminal. Only guard that
+      // physical impossibility; ordinary expanded rows are already wrapped.
+      lines.push(`${layout.indent}${visibleWidth(line) > contentWidth
+        ? truncateLine(line, contentWidth) : line}`);
+    }
+    if (!expanded && rendered.length > shown.length) {
+      lines.push(`${layout.indent}${truncateLine(theme.fg(
+        "muted", `… ${rendered.length - shown.length} more diff rows`,
+      ), contentWidth)}`);
     }
   });
 
+  if ((large || layout.summaryOnly) && hint) {
+    lines.push(...wrapTextWithAnsi(theme.fg("muted", hint), layout.width));
+  }
   return lines;
 }

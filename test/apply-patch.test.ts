@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { applyPatch, applyUpdateChunks } from "../executor.ts";
 import { parsePatch } from "../parser.ts";
 
@@ -61,6 +62,103 @@ describe("applyUpdateChunks", () => {
 });
 
 describe("applyPatch", () => {
+  test("respects umask for new files and preserves existing modes", async () => {
+    const root = await makeRoot();
+    const existing = path.join(root, "existing.txt");
+    await fs.writeFile(existing, "old\n");
+    await fs.chmod(existing, 0o755);
+    const previous = process.umask(0o077);
+    try {
+      await applyPatch(root, `*** Begin Patch
+*** Add File: new.txt
++private
+*** Update File: existing.txt
+@@
+-old
++new
+*** End Patch`);
+      expect((await fs.stat(path.join(root, "new.txt"))).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(existing)).mode & 0o777).toBe(0o755);
+    } finally {
+      process.umask(previous);
+    }
+  });
+
+  test("waits for the host mutation queue before taking snapshots", async () => {
+    const root = await makeRoot();
+    const target = path.join(root, "queued.txt");
+    await fs.writeFile(target, "before\n");
+    let pending!: ReturnType<typeof applyPatch>;
+    let settled = false;
+    await withFileMutationQueue(target, async () => {
+      pending = applyPatch(root, `*** Begin Patch
+*** Update File: queued.txt
+@@
+-ready
++patched
+*** End Patch`);
+      // Handle both outcomes immediately, even if this regression fails.
+      pending.then(() => { settled = true; }, () => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(settled).toBe(false);
+      await fs.writeFile(target, "ready\n");
+    });
+    await pending;
+    expect(await fs.readFile(target, "utf8")).toBe("patched\n");
+  });
+
+  test("locks move destinations and releases locks after cancellation", async () => {
+    const root = await makeRoot();
+    const source = path.join(root, "source.txt");
+    const destination = path.join(root, "destination.txt");
+    await fs.writeFile(source, "keep\n");
+    const controller = new AbortController();
+    let pending!: ReturnType<typeof applyPatch>;
+    let settled = false;
+    await withFileMutationQueue(destination, async () => {
+      pending = applyPatch(root, `*** Begin Patch
+*** Update File: source.txt
+*** Move to: destination.txt
+*** End Patch`, controller.signal);
+      pending.then(() => { settled = true; }, () => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(settled).toBe(false);
+      controller.abort();
+    });
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(await fs.readFile(source, "utf8")).toBe("keep\n");
+    await applyPatch(root, `*** Begin Patch
+*** Update File: source.txt
+*** Move to: destination.txt
+*** End Patch`);
+    expect(await fs.readFile(destination, "utf8")).toBe("keep\n");
+  });
+
+  test("deduplicates canonical locks for aliases", async () => {
+    const root = await makeRoot();
+    await fs.writeFile(path.join(root, "file.txt"), "same\n");
+    await fs.symlink("file.txt", path.join(root, "alias.txt"));
+    await applyPatch(root, `*** Begin Patch
+*** Update File: alias.txt
+*** Move to: file.txt
+*** End Patch`);
+    expect(await fs.readFile(path.join(root, "file.txt"), "utf8")).toBe("same\n");
+  });
+
+  test("serializes overlapping patches with reversed path order", async () => {
+    const root = await makeRoot();
+    await fs.writeFile(path.join(root, "a.txt"), "a\n");
+    await fs.writeFile(path.join(root, "b.txt"), "b\n");
+    const patch = (names: string[]) => `*** Begin Patch\n${names.map((name) =>
+      `*** Update File: ${name}.txt\n@@\n-${name}\n+${name}`,
+    ).join("\n")}\n*** End Patch`;
+    await Promise.all([
+      applyPatch(root, patch(["a", "b"])),
+      applyPatch(root, patch(["b", "a"])),
+    ]);
+    expect(await fs.readFile(path.join(root, "a.txt"), "utf8")).toBe("a\n");
+  });
+
   test("applies add, update, delete, move, and multiple files atomically", async () => {
     const root = await makeRoot();
     await fs.writeFile(path.join(root, "update.txt"), "one\ntwo\nthree\n");

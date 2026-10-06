@@ -114,7 +114,9 @@ export interface DiffRendererConfig {
   indicator: "bar" | "sign";
   longLines: LongLineMode;
   collapsedLines: number;
+  /** @deprecated Ignored: expanded diffs always show all rows. */
   expandedLines: number;
+  /** Caps collapsed previews only; never limits expanded diffs. */
   hardLineLimit: number;
   syntaxHighlighting: boolean;
   wordHighlighting: boolean;

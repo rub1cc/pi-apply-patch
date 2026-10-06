@@ -1,4 +1,5 @@
 import path from "node:path";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import {
   readSnapshot,
   removeFile,
@@ -177,7 +178,41 @@ export async function applyPatch(
   patchText: string,
   signal?: AbortSignal,
 ): Promise<ApplyPatchResultData> {
-  const operations = parsePatch(patchText);
+  throwIfAborted(signal);
+  // Resolve once so the paths we mutate are exactly the paths we lock.
+  const operations = parsePatch(patchText).map((operation) => ({
+    operation,
+    source: resolvePatchPath(root, operation.path),
+    destination: operation.type === "update" && operation.moveTo
+      ? resolvePatchPath(root, operation.moveTo)
+      : undefined,
+  }));
+  const paths = [...new Set(
+    operations.flatMap(({ source, destination }) =>
+      destination ? [source, destination] : [source],
+    ),
+  )].sort();
+
+  // A stable order prevents overlapping multi-file patches from deadlocking.
+  // Hold every lock through snapshots, validation, commit, and rollback.
+  const acquire = (index: number): Promise<ApplyPatchResultData> => {
+    throwIfAborted(signal);
+    return index === paths.length
+      ? applyLockedPatch(operations, root, signal)
+      : withFileMutationQueue(paths[index]!, () => acquire(index + 1));
+  };
+  return acquire(0);
+}
+
+async function applyLockedPatch(
+  operations: Array<{
+    operation: PatchOperation;
+    source: string;
+    destination?: string;
+  }>,
+  root: string,
+  signal?: AbortSignal,
+): Promise<ApplyPatchResultData> {
   const initial = new Map<string, Snapshot>();
   const virtual = new Map<string, VirtualFile | null>();
   const claimedPaths = new Set<string>();
@@ -202,16 +237,18 @@ export async function applyPatch(
     claimedPaths.add(absolutePath);
   };
 
-  for (const operation of operations) {
+  for (const { operation, source, destination } of operations) {
     throwIfAborted(signal);
-    const source = resolvePatchPath(root, operation.path);
     claim(source, operation.path);
 
     if (operation.type === "add") {
       if (await load(source)) {
         throw new Error(`Cannot add file because it already exists: ${operation.path}`);
       }
-      virtual.set(source, { content: operation.content, mode: 0o666 });
+      virtual.set(source, {
+        content: operation.content,
+        mode: 0o666 & ~process.umask(),
+      });
       changes.push(createChange(operation, "", operation.content));
       continue;
     }
@@ -233,8 +270,7 @@ export async function applyPatch(
       operation.path,
     );
     const updatedFile = { content: updatedContent, mode: existing.mode };
-    if (operation.moveTo) {
-      const destination = resolvePatchPath(root, operation.moveTo);
+    if (operation.moveTo && destination) {
       if (destination !== source) {
         claim(destination, operation.moveTo);
         if (await load(destination)) {
