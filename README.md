@@ -29,16 +29,31 @@ pi -e npm:@rub1cc/pi-apply-patch
 
 ## Diff presentation
 
-Small diffs fit in the default 24-row preview, with unused per-file shares
-redistributed to larger files. The budget counts visual diff rows (including
-wrapped continuations), not headings. Larger diffs show a preview and the
-configured Pi `app.tools.expand` shortcut, when bound.
+Tool headers use a small `•` dot and `Patch(path)` labels for one file, `Patch(N files)`
+for multiple files, and `Patch()` when paths are unknown. Moves retain the
+source-to-destination path display. Pending labels are accented and summarize
+only parsed patch paths, without filesystem access; incomplete or invalid patches
+fall back to `Patch()`. Failed labels are red with a `Failed` suffix. Completed
+headers use the normal title styling and retain the add/remove statistics.
+Displayed header paths have terminal sequences and control characters removed;
+patch bodies are never included in headers. The registered tool remains
+`apply_patch`, with unchanged arguments, execution, and model-facing result text.
+
+Diffs show all changed hunks inline by default, including long wrapped lines.
+In fullscreen, click the diff header or body to collapse it to a 24-row preview,
+then click again to show every row. The local view survives redraws and resizing.
+Pi's global tool-expansion shortcut still controls all tool views: expanding all
+shows full diffs, and subsequently collapsing all selects the compact preview.
+The first global expansion may leave an already-open diff unchanged.
+
+Compact previews redistribute unused per-file shares to larger files. The budget
+counts visual diff rows (including wrapped continuations), not headings.
 
 Expanded output shows the entire diff with wrapping, even when `longLines` is
 `"truncate"`. The legacy `expandedLines` option is ignored; `hardLineLimit`
 limits only collapsed previews. Very narrow expanded views omit line numbers
 and reduce gutters to leave room for content. Collapsed views below 24 columns
-remain summary-only with an expansion hint when a shortcut is bound.
+remain summary-only with a toggle hint.
 
 ## Shared presentation API
 
@@ -47,6 +62,11 @@ configuration, and rendering helpers without registering tools. The companion
 `@rub1cc/pi-renderer` uses this entry point for built-in `edit` diffs, so both
 tools share row backgrounds and expansion behavior. `showHeader: false` omits
 the summary when the caller already provides an activity header.
+`createDiffComponent()` starts fully open unless `defaultExpanded: false` is
+specified. Its `expanded` option tracks host expansion changes, `onToggle`
+requests a redraw after a local click, and the returned component exposes
+`toggleExpanded()`. Low-level `renderUnifiedDiff()` still follows its explicit
+expanded argument.
 
 ## Filesystem safety and failure semantics
 

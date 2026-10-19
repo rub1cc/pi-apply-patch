@@ -108,7 +108,7 @@ describe("unified renderer", () => {
       .map(stripTerminalSequences)
       .join("\n");
 
-    expect(output).toContain("• Edited src/example.ts (+2 -1)");
+    expect(output).toContain("Patch(src/example.ts) (+2 -1)");
     expect(output.match(/src\/example\.ts/g)).toHaveLength(1);
     expect(output).toContain("2 │-   return oldCall();");
     expect(output).toContain("2 │+   const value = newCall();");
@@ -180,9 +180,36 @@ describe("unified renderer", () => {
       .map(stripTerminalSequences)
       .join("\n");
 
-    expect(output).toContain("• Edited 2 files");
+    expect(output).toContain("Patch(2 files)");
     expect(output).toContain("src/one.ts");
     expect(output).toContain("Added src/two.ts");
+  });
+
+  test("uses the same alias for every operation and sanitizes header paths", () => {
+    for (const type of ["add", "delete", "update", "move"] as const) {
+      const single = detailsFor("old\n", "new\n", "\u001b[31msrc/file\u001b[0m\n\t\u0007.ts");
+      single.changes[0] = type === "move"
+        ? { ...single.changes[0], type, moveTo: "dest\r\n.ts" }
+        : { ...single.changes[0], type };
+      const header = renderUnifiedDiff(single, 100, false, DEFAULT_DIFF_RENDERER_CONFIG, theme)[0];
+      expect(header).toBe(`• Patch(src/file  .ts${type === "move" ? " → dest  .ts" : ""}) (+1 -1)`);
+      expect(header).not.toContain("\u001b");
+    }
+    const empty = { changes: [], stats: { files: 0, added: 0, removed: 0 } };
+    expect(renderUnifiedDiff(empty, 80, false, DEFAULT_DIFF_RENDERER_CONFIG, theme)[0]).toBe("• Patch() (+0 -0)");
+  });
+
+  test("preserves completed title, path, statistics and small status dot colors", () => {
+    const colors: [string, string][] = [];
+    const trackedTheme = { ...theme, fg: (color: string, value: string) => {
+      colors.push([color, value]);
+      return value;
+    } } as Theme;
+    const lines = renderUnifiedDiff(details, 100, false, DEFAULT_DIFF_RENDERER_CONFIG, trackedTheme);
+    expect(lines[0]).toBe("• Patch(src/example.ts) (+2 -1)");
+    expect(colors).toContainEqual(["toolTitle", "Patch("]);
+    expect(colors).toContainEqual(["accent", "src/example.ts"]);
+    expect(colors).toContainEqual(["success", "•"]);
   });
 });
 
@@ -275,16 +302,17 @@ describe("complete diff presentation", () => {
       const tools: any[] = [];
       registerApplyPatch({ registerTool: (tool: unknown) => tools.push(tool) } as any);
       const tool = tools[0];
-      const context = { state: {}, lastComponent: undefined, isError: false };
+      const context = { state: {}, lastComponent: undefined, isError: false, invalidate() {} };
       const call = tool.renderCall({}, theme, context);
       const result = { content: [], details: additions(650) };
-      for (const expanded of [false, true, false]) {
+      for (const [expanded, full] of [[false, true], [true, true], [false, false]]) {
         tool.renderResult(result, { expanded, isPartial: false }, theme, context);
         const output = plain(call.render(80));
-        expect(output).toContain(`ctrl+y to ${expanded ? "collapse" : "expand"}`);
+        expect(output).toContain(`click to ${full ? "collapse" : "expand"}`);
+        expect(output).toContain("ctrl+y to toggle all");
         expect(output).not.toContain("ctrl+o");
-        expect(output.includes("row-649")).toBe(expanded);
-        expect(output.includes("more diff rows")).toBe(!expanded);
+        expect(output.includes("row-649")).toBe(full);
+        expect(output.includes("more diff rows")).toBe(!full);
       }
       const small = plain(renderUnifiedDiff(additions(2), 80, false, config, theme));
       expect(small).not.toContain("to expand");
@@ -302,7 +330,7 @@ describe("complete diff presentation", () => {
 });
 
 describe("apply_patch activity states", () => {
-  test("uses bullet-based pending and failure states", () => {
+  test("uses small activity dots with accented pending and red failure labels", () => {
     const tools: any[] = [];
     registerApplyPatch({
       registerTool(tool: unknown) {
@@ -312,7 +340,7 @@ describe("apply_patch activity states", () => {
     const tool = tools[0];
     const state: Record<string, unknown> = {};
     const baseContext = {
-      args: { patch: "*** Begin Patch\n*** End Patch" },
+      args: { patch: "*** Begin Patch\n*** Add File: src/new.ts\n+private body\n*** End Patch" },
       toolCallId: "patch-1",
       invalidate() {},
       lastComponent: undefined,
@@ -326,21 +354,73 @@ describe("apply_patch activity states", () => {
       isError: false,
     };
 
-    const call = tool.renderCall(baseContext.args, theme, baseContext);
-    expect(call.render(80).map(stripTerminalSequences).join("\n")).toContain(
-      "• Applying patch",
+    const colors: [string, string][] = [];
+    const trackedTheme = { ...theme, fg: (color: string, value: string) => {
+      colors.push([color, value]);
+      return value;
+    } } as Theme;
+    const call = tool.renderCall(baseContext.args, trackedTheme, baseContext);
+    expect(call.render(80).map(stripTerminalSequences).join("\n").trimEnd()).toBe(
+      "• Patch(src/new.ts)",
     );
+    expect(colors).toContainEqual(["accent", "Patch(src/new.ts)"]);
 
     tool.renderResult(
       { content: [{ type: "text", text: "Patch context was not found" }] },
       { expanded: false, isPartial: false },
-      theme,
+      trackedTheme,
       { ...baseContext, isPartial: false, isError: true },
     );
     const failed = call.render(80).map(stripTerminalSequences).join("\n");
-    expect(failed).toContain("• Failed to apply patch");
+    expect(failed.split("\n")[0].trimEnd()).toBe("• Patch(src/new.ts) Failed");
+    expect(colors).toContainEqual(["error", "Patch(src/new.ts) Failed"]);
     expect(failed).toContain("└ Patch context was not found");
-    expect(failed).not.toContain("✓");
+    expect(failed).toStartWith("• ");
+    expect(failed).not.toMatch(/^[●⏺]/u);
+    expect(failed).not.toContain("private body");
+  });
+
+  test("summarizes only parsed paths without invoking execution", () => {
+    let tool: any;
+    registerApplyPatch({ registerTool: (registered: unknown) => { tool = registered; } } as any);
+    const cases: [unknown, string][] = [
+      [undefined, "Patch()"],
+      [{}, "Patch()"],
+      [{ patch: 12 }, "Patch()"],
+      [{ patch: "secret patch body" }, "Patch()"],
+      [{ patch: "*** Begin Patch\n*** Update File: incomplete.ts\n@@\n-old" }, "Patch()"],
+      [{ patch: "*** Begin Patch\n*** Delete File: missing.ts\n*** End Patch" }, "Patch(missing.ts)"],
+      [{ patch: "*** Begin Patch\n*** Update File: old.ts\n*** Move to: new.ts\n*** End Patch" }, "Patch(old.ts → new.ts)"],
+      [{ patch: "*** Begin Patch\r\n*** Add File: one.ts\r\n+*** Add File: not-a-path.ts\r\n*** Delete File: two.ts\r\n*** End Patch" }, "Patch(2 files)"],
+      [{ patch: "*** Begin Patch\n*** Add File: \u001b[31msafe\u001b[0m\tname\u0007.ts\n+secret body\n*** End Patch" }, "Patch(safe name.ts)"],
+    ];
+    for (const [args, expected] of cases) {
+      const context = { state: {}, lastComponent: undefined };
+      const call = tool.renderCall(args, theme, context);
+      expect(call.render(100).map(stripTerminalSequences).join("\n").trimEnd()).toBe(`• ${expected}`);
+    }
+  });
+
+  test("renders success and error labels even without a preceding call", () => {
+    let tool: any;
+    registerApplyPatch({ registerTool: (registered: unknown) => { tool = registered; } } as any);
+    const plain = (component: any) => component.render(100).map(stripTerminalSequences).join("\n").trimEnd();
+    const options = { expanded: false, isPartial: false };
+    const args = { patch: "*** Begin Patch\n*** Delete File: missing.ts\n*** End Patch" };
+    for (const withCall of [false, true]) {
+      for (const isError of [false, true]) {
+        const context = { state: {}, lastComponent: undefined, args, isError };
+        const call = withCall ? tool.renderCall(args, theme, context) : undefined;
+        const result = tool.renderResult({ content: [{ type: "text", text: "error details" }] }, options, theme, context);
+        const output = plain(call ?? result);
+        expect(output.split("\n")[0].trimEnd()).toBe(`• Patch(missing.ts)${isError ? " Failed" : ""}`);
+        expect(output.includes("error details")).toBe(isError);
+      }
+    }
+    for (const isError of [false, true]) {
+      const output = plain(tool.renderResult({ content: [] }, options, theme, { state: {}, isError }));
+      expect(output).toBe(`• Patch()${isError ? " Failed" : ""}`);
+    }
   });
 });
 

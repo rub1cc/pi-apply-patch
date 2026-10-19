@@ -11,6 +11,7 @@ import type {
 } from "../types.ts";
 import { createInlineHighlightMap } from "./highlight.ts";
 import { getUnifiedLayout } from "./layout.ts";
+import { getPatchSummary } from "./label.ts";
 import {
   getChangeLabel,
   getChangePath,
@@ -166,25 +167,11 @@ function renderHeader(
   theme: Theme,
 ): string {
   const change = details.changes.length === 1 ? details.changes[0] : undefined;
-  let title: string;
-  if (change) {
-    const verb = change.type === "add"
-      ? "Added"
-      : change.type === "delete"
-        ? "Deleted"
-        : "Edited";
-    title = `${theme.fg("toolTitle", theme.bold(verb))} ${theme.fg(
-      "accent",
-      getChangePath(change),
-    )}`;
-  } else if (details.stats.files > 1) {
-    title = `${theme.fg("toolTitle", theme.bold("Edited"))} ${theme.fg(
-      "toolOutput",
-      `${details.stats.files} files`,
-    )}`;
-  } else {
-    title = theme.fg("toolTitle", theme.bold("Applied patch"));
-  }
+  const summary = getPatchSummary(details.changes.map(getChangePath));
+  const title = `${theme.fg("toolTitle", theme.bold("Patch("))}${theme.fg(
+    change ? "accent" : "toolOutput",
+    summary,
+  )}${theme.fg("toolTitle", theme.bold(")"))}`;
   const text = [
     theme.fg("success", "•"),
     " ",
@@ -202,13 +189,14 @@ export function renderUnifiedDiff(
   config: DiffRendererConfig,
   theme: Theme,
   showHeader = true,
+  toggleHint?: string,
 ): string[] {
   const layout = getUnifiedLayout(width, config);
   const lines = showHeader ? [renderHeader(details, layout.width, theme)] : [];
   if (details.changes.length === 0) return lines;
 
   const shortcut = keyText("app.tools.expand");
-  const hint = shortcut ? `${shortcut} to ${expanded ? "collapse" : "expand"}` : "";
+  const hint = toggleHint ?? (shortcut ? `${shortcut} to ${expanded ? "collapse" : "expand"}` : "");
   if (layout.summaryOnly && !expanded) {
     if (hint) lines.push(...wrapTextWithAnsi(theme.fg("muted", hint), layout.width));
     return lines;

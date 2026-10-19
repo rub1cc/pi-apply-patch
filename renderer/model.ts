@@ -9,7 +9,7 @@ export interface DiffModel {
   diff: ParsedDiff;
 }
 
-export function getChangePath(change: DiffModel): string {
+export function getChangePath(change: Pick<DiffModel, "path" | "moveTo">): string {
   return change.moveTo ? `${change.path} → ${change.moveTo}` : change.path;
 }
 

@@ -11,14 +11,29 @@ import {
   DELETE_FILE,
   END_PATCH,
   MOVE_TO,
+  parsePatch,
   UPDATE_FILE,
 } from "./parser.ts";
-import { createDiffComponent } from "./renderer/index.ts";
+import { createDiffComponent, type DiffComponent } from "./renderer/index.ts";
+import { getPatchLabel } from "./renderer/label.ts";
+import { getChangePath } from "./renderer/model.ts";
 import { normalizeApplyPatchDetails } from "./renderer/normalize.ts";
 import type { ApplyPatchDetails, DiffRendererConfig } from "./types.ts";
 
 interface ApplyPatchRenderState {
   callComponent?: Box;
+  label?: string;
+  diffComponent?: DiffComponent;
+}
+
+function getPendingLabel(args: { patch?: unknown } | undefined): string {
+  if (typeof args?.patch !== "string") return getPatchLabel([]);
+  try {
+    // Parsing is pure: rendering must never prepare or execute the patch.
+    return getPatchLabel(parsePatch(args.patch).map(getChangePath));
+  } catch {
+    return getPatchLabel([]);
+  }
 }
 
 function getCallComponent(
@@ -36,15 +51,12 @@ function getCallComponent(
   return component;
 }
 
-function renderPendingCall(component: Box, theme: Theme): Box {
+function renderPendingCall(component: Box, label: string, theme: Theme): Box {
   component.setBgFn((text: string) => text);
   component.clear();
   component.addChild(
     new Text(
-      `${theme.fg("accent", "•")} ${theme.fg(
-        "toolTitle",
-        theme.bold("Applying patch"),
-      )}`,
+      `${theme.fg("accent", "•")} ${theme.fg("accent", theme.bold(label))}`,
       0,
       0,
     ),
@@ -52,7 +64,7 @@ function renderPendingCall(component: Box, theme: Theme): Box {
   return component;
 }
 
-function renderError(component: Box, errorText: string, theme: Theme): Box {
+function renderError(component: Box, label: string, errorText: string, theme: Theme): Box {
   component.setBgFn((text: string) => text);
   component.clear();
   const details = errorText
@@ -71,7 +83,7 @@ function renderError(component: Box, errorText: string, theme: Theme): Box {
     new Text(
       `${theme.fg("error", "•")} ${theme.fg(
         "error",
-        theme.bold("Failed to apply patch"),
+        theme.bold(`${label} Failed`),
       )}${details}`,
       0,
       0,
@@ -82,23 +94,19 @@ function renderError(component: Box, errorText: string, theme: Theme): Box {
 
 function renderSuccess(
   component: Box,
-  details: ApplyPatchDetails | undefined,
-  expanded: boolean,
+  diffComponent: DiffComponent | undefined,
   theme: Theme,
-  config?: Partial<DiffRendererConfig>,
+  label: string,
 ): Box {
   // Keep successful diffs transparent so the add/remove/context colors carry
   // the visual emphasis instead of a full-width tool background.
   component.setBgFn((text: string) => text);
   component.clear();
 
-  if (!details) {
+  if (!diffComponent) {
     component.addChild(
       new Text(
-        `${theme.fg("success", "•")} ${theme.fg(
-          "toolTitle",
-          theme.bold("Applied patch"),
-        )}`,
+        `${theme.fg("success", "•")} ${theme.fg("toolTitle", theme.bold(label))}`,
         0,
         0,
       ),
@@ -106,9 +114,7 @@ function renderSuccess(
     return component;
   }
 
-  component.addChild(
-    createDiffComponent({ details, expanded, config, theme }),
-  );
+  component.addChild(diffComponent);
   return component;
 }
 
@@ -178,10 +184,12 @@ export function registerApplyPatch(
       };
     },
 
-    renderCall(_args, theme, context) {
+    renderCall(args, theme, context) {
       const state = context.state as ApplyPatchRenderState;
+      state.label = getPendingLabel(args);
       return renderPendingCall(
         getCallComponent(state, context.lastComponent),
+        state.label,
         theme,
       );
     },
@@ -194,6 +202,7 @@ export function registerApplyPatch(
       }
 
       const state = context.state as ApplyPatchRenderState;
+      const label = state.label ?? getPendingLabel(context.args);
       const errorText = context.isError
         ? result.content
             .filter((item) => item.type === "text")
@@ -204,16 +213,22 @@ export function registerApplyPatch(
       const details = context.isError
         ? undefined
         : normalizeApplyPatchDetails(result.details);
+      state.diffComponent = details ? createDiffComponent({
+        details,
+        expanded,
+        config: rendererConfig,
+        theme,
+        onToggle: context.invalidate,
+      }, state.diffComponent) : undefined;
 
       if (state.callComponent) {
-        if (context.isError) renderError(state.callComponent, errorText, theme);
+        if (context.isError) renderError(state.callComponent, label, errorText, theme);
         else {
           renderSuccess(
             state.callComponent,
-            details,
-            expanded,
+            state.diffComponent,
             theme,
-            rendererConfig,
+            label,
           );
         }
 
@@ -224,25 +239,13 @@ export function registerApplyPatch(
       }
 
       if (context.isError) {
-        return new Text(
-          theme.fg("error", errorText || "Failed to apply patch"),
-          0,
-          0,
-        );
+        return renderError(new Box(0, 0, (text: string) => text), label, errorText, theme);
       }
 
-      return details
-        ? createDiffComponent({
-            details,
-            expanded,
-            config: rendererConfig,
-            theme,
-          })
+      return state.diffComponent
+        ? state.diffComponent
         : new Text(
-            `${theme.fg("success", "•")} ${theme.fg(
-              "toolTitle",
-              theme.bold("Applied patch"),
-            )}`,
+            `${theme.fg("success", "•")} ${theme.fg("toolTitle", theme.bold(label))}`,
             0,
             0,
           );

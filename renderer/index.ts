@@ -2,7 +2,7 @@ export { createDiffComponent } from "./component.ts";
 export { normalizeApplyPatchDetails } from "./normalize.ts";
 export { DEFAULT_DIFF_RENDERER_CONFIG } from "../types.ts";
 export type { ApplyPatchDetails, DiffRendererConfig } from "../types.ts";
-export type { CreateDiffComponentOptions } from "./component.ts";
+export type { CreateDiffComponentOptions, DiffComponent } from "./component.ts";
 export { createDiff } from "./diff.ts";
 export { createInlineDiff } from "./inline-diff.ts";
 export type { InlineSpan } from "./inline-diff.ts";
