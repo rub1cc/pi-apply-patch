@@ -134,14 +134,14 @@ describe("applyPatch", () => {
     expect(await fs.readFile(destination, "utf8")).toBe("keep\n");
   });
 
-  test("deduplicates canonical locks for aliases", async () => {
+  test("rejects leaf aliases instead of silently patching their targets", async () => {
     const root = await makeRoot();
     await fs.writeFile(path.join(root, "file.txt"), "same\n");
     await fs.symlink("file.txt", path.join(root, "alias.txt"));
-    await applyPatch(root, `*** Begin Patch
+    await expect(applyPatch(root, `*** Begin Patch
 *** Update File: alias.txt
 *** Move to: file.txt
-*** End Patch`);
+*** End Patch`)).rejects.toThrow("symbolic link");
     expect(await fs.readFile(path.join(root, "file.txt"), "utf8")).toBe("same\n");
   });
 

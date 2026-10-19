@@ -1,6 +1,7 @@
 import path from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import {
+  assertPinnedPath,
   readSnapshot,
   removeFile,
   removeFileIfPresent,
@@ -9,143 +10,16 @@ import {
   writeFileAtomic,
 } from "./filesystem.ts";
 import { parsePatch } from "./parser.ts";
+import { applyUpdateChunks } from "./text-update.ts";
+export { applyUpdateChunks } from "./text-update.ts";
 import { createDiff } from "./renderer/diff.ts";
 import type {
   AppliedFileChange,
   ApplyPatchResultData,
   PatchOperation,
   Snapshot,
-  UpdateChunk,
   VirtualFile,
 } from "./types.ts";
-
-function rstrip(value: string): string {
-  return value.replace(/[ \t]+$/g, "");
-}
-
-type MatchMode = "exact" | "rstrip" | "trim";
-
-function lineMatches(actual: string, expected: string, mode: MatchMode): boolean {
-  switch (mode) {
-    case "exact":
-      return actual === expected;
-    case "rstrip":
-      return rstrip(actual) === rstrip(expected);
-    case "trim":
-      return actual.trim() === expected.trim();
-  }
-}
-
-function sequenceMatches(
-  lines: string[],
-  needle: string[],
-  index: number,
-  mode: MatchMode,
-): boolean {
-  if (index + needle.length > lines.length) return false;
-  for (let i = 0; i < needle.length; i++) {
-    if (!lineMatches(lines[index + i], needle[i], mode)) return false;
-  }
-  return true;
-}
-
-function findSequence(
-  lines: string[],
-  needle: string[],
-  start: number,
-  endOfFile = false,
-): number {
-  if (needle.length === 0) return endOfFile ? lines.length : start;
-
-  const modes: MatchMode[] = ["exact", "rstrip", "trim"];
-  for (const mode of modes) {
-    if (endOfFile) {
-      const index = lines.length - needle.length;
-      if (index >= start && sequenceMatches(lines, needle, index, mode)) {
-        return index;
-      }
-      continue;
-    }
-
-    for (
-      let index = Math.max(0, start);
-      index <= lines.length - needle.length;
-      index++
-    ) {
-      if (sequenceMatches(lines, needle, index, mode)) return index;
-    }
-  }
-  return -1;
-}
-
-function findContextLine(
-  lines: string[],
-  context: string,
-  start: number,
-): number {
-  const modes: MatchMode[] = ["exact", "rstrip", "trim"];
-  for (const mode of modes) {
-    for (let i = Math.max(0, start); i < lines.length; i++) {
-      if (lineMatches(lines[i], context, mode)) return i;
-    }
-  }
-  return -1;
-}
-
-export function applyUpdateChunks(
-  original: string,
-  chunks: UpdateChunk[],
-  filePath: string,
-): string {
-  const eol = original.includes("\r\n") ? "\r\n" : "\n";
-  const normalized = original.replace(/\r\n/g, "\n");
-  const originallyHadTrailingNewline = normalized.endsWith("\n");
-  const lines = normalized.length === 0 ? [] : normalized.split("\n");
-
-  if (originallyHadTrailingNewline && lines[lines.length - 1] === "") lines.pop();
-
-  let cursor = 0;
-  for (const chunk of chunks) {
-    let searchStart = cursor;
-
-    if (chunk.context !== undefined) {
-      const contextIndex = findContextLine(lines, chunk.context, cursor);
-      if (contextIndex < 0) {
-        throw new Error(`Could not find context "${chunk.context}" in ${filePath}`);
-      }
-      searchStart = contextIndex + 1;
-    }
-
-    let position: number;
-    if (chunk.oldLines.length === 0) {
-      position = chunk.endOfFile ? lines.length : searchStart;
-    } else {
-      position = findSequence(
-        lines,
-        chunk.oldLines,
-        searchStart,
-        chunk.endOfFile,
-      );
-      if (position < 0) {
-        const preview = chunk.oldLines.slice(0, 4).join("\n");
-        throw new Error(
-          `Could not apply patch to ${filePath}.\n` +
-            `Expected context was not found:\n${preview}`,
-        );
-      }
-    }
-
-    lines.splice(position, chunk.oldLines.length, ...chunk.newLines);
-    cursor = position + chunk.newLines.length;
-  }
-
-  let trailingNewline = originallyHadTrailingNewline;
-  if (original.length === 0 && lines.length > 0) trailingNewline = true;
-
-  let result = lines.join("\n") + (trailingNewline ? "\n" : "");
-  if (eol === "\r\n") result = result.replace(/\n/g, "\r\n");
-  return result;
-}
 
 function createChange(
   operation: PatchOperation,
@@ -213,6 +87,12 @@ async function applyLockedPatch(
   root: string,
   signal?: AbortSignal,
 ): Promise<ApplyPatchResultData> {
+  // Queue waits can outlive the path approval. Reject redirected ancestors
+  // before taking snapshots, not just before the eventual commit.
+  for (const { source, destination } of operations) {
+    assertPinnedPath(source);
+    if (destination) assertPinnedPath(destination);
+  }
   const initial = new Map<string, Snapshot>();
   const virtual = new Map<string, VirtualFile | null>();
   const claimedPaths = new Set<string>();
@@ -316,17 +196,24 @@ async function applyLockedPatch(
     }
   }
 
+  const attempted = new Set<string>();
   try {
     for (const [filePath, file] of writes) {
       throwIfAborted(signal);
+      assertPinnedPath(filePath);
+      attempted.add(filePath);
       await writeFileAtomic(filePath, file);
     }
     for (const filePath of deletes) {
       throwIfAborted(signal);
+      assertPinnedPath(filePath);
+      attempted.add(filePath);
       await removeFile(filePath);
     }
   } catch (error) {
-    for (const [filePath, snapshot] of initial) {
+    const rollbackFailures: Array<{ path: string; reason: string }> = [];
+    for (const filePath of [...attempted].reverse()) {
+      const snapshot = initial.get(filePath)!;
       try {
         if (snapshot.exists) {
           await writeFileAtomic(filePath, {
@@ -336,9 +223,15 @@ async function applyLockedPatch(
         } else {
           await removeFileIfPresent(filePath);
         }
-      } catch {
-        // Preserve the original commit error.
+      } catch (rollbackError) {
+        rollbackFailures.push({
+          path: filePath,
+          reason: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+        });
       }
+    }
+    if (rollbackFailures.length) {
+      throw new PatchRollbackError(error, [...attempted], rollbackFailures);
     }
     throw error;
   }
@@ -351,4 +244,22 @@ async function applyLockedPatch(
       stats: { files: changes.length, added, removed },
     },
   };
+}
+
+/** Exposes potentially modified paths when best-effort restoration failed. */
+export class PatchRollbackError extends Error {
+  constructor(
+    cause: unknown,
+    readonly attemptedPaths: string[],
+    readonly rollbackFailures: Array<{ path: string; reason: string }>,
+  ) {
+    super(
+      `Patch commit failed: ${cause instanceof Error ? cause.message : String(cause)}. ` +
+      `Rollback incomplete; files may remain changed: ${rollbackFailures.map(
+        (failure) => `${failure.path} (${failure.reason})`,
+      ).join("; ")}`,
+      { cause },
+    );
+    this.name = "PatchRollbackError";
+  }
 }

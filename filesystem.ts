@@ -1,4 +1,4 @@
-import { lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { constants, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Snapshot, VirtualFile } from "./types.ts";
@@ -71,6 +71,15 @@ export function resolvePatchPath(root: string, filePath: string): string {
   }
 
   const canonicalRoot = canonicalizePathSync(resolvedRoot);
+  // A patch must never reinterpret a leaf symlink as its target (especially
+  // Delete File). Reject both existing and dangling leaf links explicitly.
+  try {
+    if (lstatSync(resolved).isSymbolicLink()) {
+      throw new Error(`Cannot patch a symbolic link: ${filePath}`);
+    }
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   const canonicalResolved = canonicalizePathSync(resolved);
   if (!isWithin(canonicalResolved, canonicalRoot) || canonicalResolved === canonicalRoot) {
     throw new Error(`Path escapes the working directory through a symlink: ${filePath}`);
@@ -79,15 +88,45 @@ export function resolvePatchPath(root: string, filePath: string): string {
   return canonicalResolved;
 }
 
+/** Detect retargeting of any existing component of an already pinned path. */
+export function assertPinnedPath(filePath: string): void {
+  const absolute = path.resolve(filePath);
+  const root = path.parse(absolute).root;
+  let current = root;
+  for (const part of path.relative(root, absolute).split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Patch path changed through a symbolic link: ${current}`);
+      }
+    } catch (error: any) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
 export async function readSnapshot(filePath: string): Promise<Snapshot> {
+  assertPinnedPath(filePath);
   try {
     const stat = await fs.lstat(filePath);
     if (!stat.isFile()) throw new Error(`Not a regular file: ${filePath}`);
 
-    const buffer = await fs.readFile(filePath);
+    const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let buffer: Buffer;
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino) {
+        throw new Error(`File changed while opening patch snapshot: ${filePath}`);
+      }
+      buffer = await handle.readFile();
+      assertPinnedPath(filePath);
+    } finally {
+      await handle.close();
+    }
     let content: string;
     try {
-      content = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+      content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer);
     } catch {
       throw new Error(`Cannot patch non-UTF-8 file: ${filePath}`);
     }
@@ -110,7 +149,9 @@ export async function writeFileAtomic(
   file: VirtualFile,
 ): Promise<void> {
   const dir = path.dirname(filePath);
+  assertPinnedPath(filePath);
   await fs.mkdir(dir, { recursive: true });
+  assertPinnedPath(filePath);
 
   const temporaryPath = path.join(
     dir,
@@ -120,18 +161,32 @@ export async function writeFileAtomic(
   );
 
   try {
-    await fs.writeFile(temporaryPath, file.content, { mode: file.mode & 0o777 });
-    await fs.chmod(temporaryPath, file.mode & 0o777);
+    const handle = await fs.open(temporaryPath, "wx", file.mode & 0o777);
+    try {
+      await handle.writeFile(file.content);
+      await handle.chmod(file.mode & 0o777);
+    } finally {
+      await handle.close();
+    }
+    assertPinnedPath(filePath);
+    assertPinnedPath(temporaryPath);
     await fs.rename(temporaryPath, filePath);
   } finally {
-    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    try {
+      assertPinnedPath(temporaryPath);
+      await fs.rm(temporaryPath, { force: true });
+    } catch {
+      // Never follow a redirected directory during best-effort cleanup.
+    }
   }
 }
 
 export async function removeFile(filePath: string): Promise<void> {
+  assertPinnedPath(filePath);
   await fs.unlink(filePath);
 }
 
 export async function removeFileIfPresent(filePath: string): Promise<void> {
+  assertPinnedPath(filePath);
   await fs.rm(filePath, { force: true });
 }

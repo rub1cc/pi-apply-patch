@@ -2,6 +2,8 @@ export interface UpdateChunk {
   context?: string;
   oldLines: string[];
   newLines: string[];
+  /** Explicit unchanged lines, as [old-line index, new-line index] pairs. */
+  contextLineIndices?: Array<[number, number]>;
   endOfFile: boolean;
 }
 

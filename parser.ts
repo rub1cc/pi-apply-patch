@@ -70,7 +70,7 @@ export function parsePatch(text: string): PatchOperation[] {
       operations.push({
         type: "add",
         path: filePath,
-        content: content.join("\n") + "\n",
+        content: content.length === 0 ? "" : content.join("\n") + "\n",
       });
       continue;
     }
@@ -147,6 +147,10 @@ export function parsePatch(text: string): PatchOperation[] {
           const value = current.slice(1);
           switch (current[0]) {
             case " ":
+              (currentChunk.contextLineIndices ??= []).push([
+                currentChunk.oldLines.length,
+                currentChunk.newLines.length,
+              ]);
               currentChunk.oldLines.push(value);
               currentChunk.newLines.push(value);
               break;
