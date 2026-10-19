@@ -2,6 +2,10 @@
   "name": "@rub1cc/pi-apply-patch",
   "version": "0.1.0",
   "description": "Codex-compatible apply_patch tool with rich diff rendering for Pi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rub1cc/pi-apply-patch.git"
+  },
   "type": "module",
   "exports": {
     ".": "./index.ts",

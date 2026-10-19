@@ -76,3 +76,8 @@ npm pack --dry-run
 ```
 
 Pi loads the TypeScript source directly; no build step is required.
+
+## Releases
+
+See [RELEASING.md](RELEASING.md) for npm trusted publishing and tag-based releases
+with `npm version`.
